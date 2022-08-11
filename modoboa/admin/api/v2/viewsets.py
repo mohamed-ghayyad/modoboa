@@ -7,15 +7,14 @@ from django.contrib.contenttypes.models import ContentType
 from django_filters import rest_framework as dj_filters
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import (
-    filters, mixins, permissions, response, status, viewsets
+    filters, mixins, parsers, permissions, response, status, viewsets
 )
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 
-from modoboa.admin.api.v1 import (
-    serializers as v1_serializers, viewsets as v1_viewsets
-)
+from modoboa.admin.api.v1 import viewsets as v1_viewsets
 from modoboa.core import models as core_models
+from modoboa.lib import renderers as lib_renderers
 from modoboa.lib import viewsets as lib_viewsets
 
 from ... import lib
@@ -58,15 +57,13 @@ class DomainViewSet(lib_viewsets.RevisionModelMixin,
         return models.Domain.objects.get_for_admin(self.request.user)
 
     def get_serializer_class(self, *args, **kwargs):
-        if self.action == "create":
-            return serializers.DomainSerializer
         if self.action == "delete":
             return serializers.DeleteDomainSerializer
         if self.action == "administrators":
             return serializers.DomainAdminSerializer
         if self.action in ["add_administrator", "remove_administrator"]:
             return serializers.SimpleDomainAdminSerializer
-        return v1_serializers.DomainSerializer
+        return serializers.DomainSerializer
 
     @action(methods=["post"], detail=True)
     def delete(self, request, **kwargs):
@@ -111,6 +108,33 @@ class DomainViewSet(lib_viewsets.RevisionModelMixin,
         domain.remove_admin(serializer.validated_data["account"])
         return response.Response()
 
+    @action(methods=["get"], detail=False,
+            renderer_classes=(lib_renderers.CSVRenderer,))
+    def export(self, request, **kwargs):
+        """Export domains and aliases to CSV."""
+        result = []
+        for domain in self.get_queryset():
+            result += domain.to_csv_rows()
+        return response.Response(result)
+
+    @extend_schema(
+        request=serializers.CSVImportSerializer
+    )
+    @action(methods=["post"],
+            detail=False,
+            parser_classes=(parsers.MultiPartParser, parsers.FormParser),
+            url_path="import")
+    def import_from_csv(self, request, **kwargs):
+        """Import domains and aliases from CSV file."""
+        serializer = serializers.CSVImportSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        status, msg = lib.import_data(
+            request.user,
+            request.FILES["sourcefile"],
+            serializer.validated_data
+        )
+        return response.Response({"status": status, "message": msg})
+
 
 class AccountFilterSet(dj_filters.FilterSet):
     """Custom FilterSet for Account."""
@@ -141,6 +165,8 @@ class AccountViewSet(v1_viewsets.AccountViewSet):
             return serializers.WritableAccountSerializer
         if self.action == "delete":
             return serializers.DeleteAccountSerializer
+        if self.action in ["list", "retrieve"]:
+            return serializers.AccountSerializer
         return super().get_serializer_class()
 
     def get_queryset(self):
@@ -151,7 +177,10 @@ class AccountViewSet(v1_viewsets.AccountViewSet):
             .filter(content_type=ContentType.objects.get_for_model(user))
             .values_list("object_id", flat=True)
         )
-        return core_models.User.objects.filter(pk__in=ids)
+        return (
+            core_models.User.objects.filter(pk__in=ids)
+            .prefetch_related("userobjectlimit_set")
+        )
 
     @action(methods=["post"], detail=False)
     def validate(self, request, **kwargs):
@@ -190,6 +219,33 @@ class IdentityViewSet(viewsets.ViewSet):
         serializer = serializers.IdentitySerializer(
             lib.get_identities(request.user), many=True)
         return response.Response(serializer.data)
+
+    @action(methods=["get"], detail=False,
+            renderer_classes=(lib_renderers.CSVRenderer,))
+    def export(self, request, **kwargs):
+        """Export accounts and aliases to CSV."""
+        result = []
+        for idt in lib.get_identities(request.user):
+            result.append(idt.to_csv_row())
+        return response.Response(result)
+
+    @extend_schema(
+        request=serializers.CSVIdentityImportSerializer
+    )
+    @action(methods=["post"],
+            detail=False,
+            parser_classes=(parsers.MultiPartParser, parsers.FormParser),
+            url_path="import")
+    def import_from_csv(self, request, **kwargs):
+        """Import accounts and aliases from CSV file."""
+        serializer = serializers.CSVIdentityImportSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        status, msg = lib.import_data(
+            request.user,
+            request.FILES["sourcefile"],
+            serializer.validated_data
+        )
+        return response.Response({"status": status, "message": msg})
 
 
 class AliasViewSet(v1_viewsets.AliasViewSet):
@@ -265,3 +321,18 @@ class UserAccountViewSet(viewsets.ViewSet):
                 ).update(enabled=False)
             alias.set_recipients(recipients)
         return response.Response(serializer.validated_data)
+
+
+class AlarmViewSet(viewsets.ReadOnlyModelViewSet):
+    """Viewset for Alarm."""
+
+    permission_classes = (
+        permissions.IsAuthenticated,
+    )
+    serializer_class = serializers.AlarmSerializer
+
+    def get_queryset(self):
+        return models.Alarm.objects.filter(
+            domain__in=models.Domain.objects.get_for_admin(
+                self.request.user)
+        )

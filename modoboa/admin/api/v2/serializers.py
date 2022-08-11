@@ -1,10 +1,13 @@
 """Admin API v2 serializers."""
 
+import ipaddress
 import os
+from typing import List
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core import validators as dj_validators
+from django.shortcuts import get_object_or_404
 from django.utils.translation import ugettext as _
 
 from django.contrib.auth import password_validation
@@ -13,11 +16,16 @@ from rest_framework import serializers
 
 from modoboa.admin.api.v1 import serializers as v1_serializers
 from modoboa.core import models as core_models, signals as core_signals
+from modoboa.lib import email_utils
 from modoboa.lib import exceptions as lib_exceptions
 from modoboa.lib import fields as lib_fields
 from modoboa.lib import validators, web_utils
 from modoboa.lib.sysutils import exec_cmd
 from modoboa.parameters import tools as param_tools
+from modoboa.limits import constants as limits_constants
+from modoboa.limits import models as limits_models
+from modoboa.transport import models as transport_models
+from modoboa.transport.api.v2 import serializers as transport_serializers
 
 from ... import constants, models
 
@@ -31,20 +39,52 @@ class CreateDomainAdminSerializer(serializers.Serializer):
     with_aliases = serializers.BooleanField(default=False)
 
 
+class DomainResourceSerializer(serializers.ModelSerializer):
+    """Serializer for domain resource."""
+
+    class Meta:
+        fields = ("name", "label", "max_value", "current_value", "usage")
+        model = limits_models.DomainObjectLimit
+
+
 class DomainSerializer(v1_serializers.DomainSerializer):
     """Domain serializer for v2 API."""
 
-    domain_admin = CreateDomainAdminSerializer(required=False)
+    domain_admin = CreateDomainAdminSerializer(required=False, write_only=True)
+    transport = transport_serializers.TransportSerializer(required=False)
 
     class Meta(v1_serializers.DomainSerializer.Meta):
         fields = v1_serializers.DomainSerializer.Meta.fields + (
-            "domain_admin",
+            "domain_admin", "transport", "opened_alarms_count"
         )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not param_tools.get_global_parameter("enable_domain_limits", app="limits"):
+            return
+        self.fields["resources"] = DomainResourceSerializer(
+            many=True, source="domainobjectlimit_set", required=False
+        )
+
+    def validate(self, data):
+        result = super().validate(data)
+        dtype = data.get("type", "domain")
+        if dtype == "relaydomain" and not data.get("transport"):
+            raise serializers.ValidationError({"transport": _("This field is required")})
+        return result
 
     def create(self, validated_data):
         """Create administrator and other stuff if needed."""
         domain_admin = validated_data.pop("domain_admin", None)
+        transport_def = validated_data.pop("transport", None)
         domain = super().create(validated_data)
+        if transport_def:
+            transport = transport_models.Transport(**transport_def)
+            transport.pattern = domain.name
+            transport.save()
+            domain.transport = transport
+            domain.save()
+
         if not domain_admin:
             return domain
 
@@ -98,6 +138,33 @@ class DomainSerializer(v1_serializers.DomainSerializer):
 
         domain.add_admin(da)
         return domain
+
+    def update(self, instance, validated_data):
+        """Update domain and create/update transport."""
+        transport_def = validated_data.pop("transport", None)
+        resources = validated_data.pop("domainobjectlimit_set", None)
+        super().update(instance, validated_data)
+        if transport_def and instance.type == "relaydomain":
+            transport = getattr(instance, "transport", None)
+            created = False
+            if transport:
+                for key, value in transport_def.items():
+                    setattr(instance, key, value)
+                transport._settings = transport_def["_settings"]
+            else:
+                transport = transport_models.Transport(**transport_def)
+                created = True
+            transport.pattern = instance.name
+            transport.save()
+            if created:
+                instance.transport = transport
+                instance.save()
+        if resources:
+            for resource in resources:
+                instance.domainobjectlimit_set.filter(
+                    name=resource["name"]
+                ).update(max_value=resource["max_value"])
+        return instance
 
 
 class DeleteDomainSerializer(serializers.Serializer):
@@ -165,6 +232,21 @@ class AdminGlobalParametersSerializer(serializers.Serializer):
                 )
         return value
 
+    def validate_valid_mxs(self, value):
+        """Make sure it only contains IP addresses."""
+        if not value:
+            return value
+        try:
+            ip_addresses = [
+                ipaddress.ip_network(v.strip())
+                for v in value.split() if v.strip()
+            ]
+        except ValueError:
+            raise serializers.ValidationError(
+                _("This field only allows valid IP addresses (or networks)")
+            )
+        return value
+
     def validate(self, data):
         """Check MX options."""
         condition = (
@@ -212,6 +294,47 @@ class IdentitySerializer(serializers.Serializer):
     tags = TagSerializer(many=True)
 
 
+class AccountResourceSerializer(serializers.ModelSerializer):
+    """Serializer for user resource."""
+
+    class Meta:
+        fields = ("name", "label", "max_value", "current_value", "usage")
+        model = limits_models.UserObjectLimit
+
+
+class AccountSerializer(v1_serializers.AccountSerializer):
+    """Add support for user resources."""
+
+    aliases = serializers.ListField(
+        child=lib_fields.DRFEmailFieldUTF8(),
+        source="mailbox.alias_addresses"
+    )
+
+    class Meta(v1_serializers.AccountSerializer.Meta):
+        fields = (
+            v1_serializers.AccountSerializer.Meta.fields
+            + ("aliases", )
+        )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not param_tools.get_global_parameter("enable_admin_limits", app="limits"):
+            return
+        self.fields["resources"] = serializers.SerializerMethodField()
+
+    def get_resources(self, account) -> List[AccountResourceSerializer]:
+        if account.role == 'SimpleUsers':
+            return []
+        resources = []
+        for limit in account.userobjectlimit_set.all():
+            tpl = limits_constants.DEFAULT_USER_LIMITS[limit.name]
+            if "required_role" in tpl:
+                if account.role != tpl["required_role"]:
+                    continue
+            resources.append(limit)
+        return AccountResourceSerializer(resources, many=True).data
+
+
 class MailboxSerializer(serializers.ModelSerializer):
     """Base mailbox serializer."""
 
@@ -238,6 +361,14 @@ class MailboxSerializer(serializers.ModelSerializer):
         return data
 
 
+class WritableResourceSerializer(serializers.ModelSerializer):
+    """Serializer used to update resource."""
+
+    class Meta:
+        fields = ("name", "max_value")
+        model = limits_models.UserObjectLimit
+
+
 class WritableAccountSerializer(v1_serializers.WritableAccountSerializer):
     """Add support for aliases and sender addresses."""
 
@@ -252,7 +383,13 @@ class WritableAccountSerializer(v1_serializers.WritableAccountSerializer):
             field
             for field in v1_serializers.WritableAccountSerializer.Meta.fields
             if field != "random_password"
-        ) + ("aliases", )
+        ) + ("aliases",)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not param_tools.get_global_parameter("enable_admin_limits", app="limits"):
+            return
+        self.fields["resources"] = WritableResourceSerializer(many=True, required=False)
 
     def validate_aliases(self, value):
         """Check if required domains are locals and user can access them."""
@@ -284,6 +421,25 @@ class WritableAccountSerializer(v1_serializers.WritableAccountSerializer):
                     data["mailbox"] = {
                         "use_domain_quota": True
                     }
+        if "mailbox" in data and "username" in data:
+            self.address, domain_name = email_utils.split_mailbox(data["username"])
+            self.domain = get_object_or_404(
+                models.Domain, name=domain_name)
+            creator = self.context["request"].user
+            if not creator.can_access(self.domain):
+                raise serializers.ValidationError({"mailbox": _("Permission denied.")})
+            if not self.instance:
+                try:
+                    core_signals.can_create_object.send(
+                        sender=self.__class__, context=creator,
+                        klass=models.Mailbox)
+                    core_signals.can_create_object.send(
+                        sender=self.__class__, context=self.domain,
+                        object_type="mailboxes")
+                except lib_exceptions.ModoboaException as inst:
+                    raise serializers.ValidationError({
+                        "mailbox": str(inst)
+                    })
         if data.get("password") or not self.partial:
             password = data.get("password")
             if password:
@@ -366,6 +522,12 @@ class WritableAccountSerializer(v1_serializers.WritableAccountSerializer):
                 instance.email = validated_data["username"]
                 self._create_mailbox(creator, instance, mailbox_data)
         instance.save()
+        resources = validated_data.get("resources")
+        if resources:
+            for resource in resources:
+                instance.userobjectlimit_set.filter(
+                    name=resource["name"]
+                ).update(max_value=resource["max_value"])
         self.set_permissions(instance, domains)
         return instance
 
@@ -385,7 +547,7 @@ class AliasSerializer(v1_serializers.AliasSerializer):
             field
             for field in v1_serializers.AliasSerializer.Meta.fields
             if field != "internal"
-        ) + ("expire_at", "description")
+        ) + ("expire_at", "description", "creation", "last_modification")
 
 
 class UserForwardSerializer(serializers.Serializer):
@@ -403,3 +565,26 @@ class UserForwardSerializer(serializers.Serializer):
             dj_validators.validate_email(recipient)
             recipients.append(recipient)
         return recipients
+
+
+class CSVImportSerializer(serializers.Serializer):
+    """Base serializer for all CSV import endpoints."""
+
+    sourcefile = serializers.FileField()
+    sepchar = serializers.CharField(required=False, default=";")
+    continue_if_exists = serializers.BooleanField(default=False)
+
+
+class CSVIdentityImportSerializer(CSVImportSerializer):
+    """Custom serializer for identity import."""
+
+    crypt_password = serializers.BooleanField()
+
+
+class AlarmSerializer(serializers.ModelSerializer):
+    """Serializer for Alarm related endpoints."""
+
+    class Meta:
+        depth = 1
+        fields = "__all__"
+        model = models.Alarm

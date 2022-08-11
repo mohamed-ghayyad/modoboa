@@ -104,9 +104,50 @@
         <domain-limitations-form :domain="editedDomain" />
       </v-expansion-panel-content>
     </v-expansion-panel>
+    <v-expansion-panel v-if="editedDomain.type === 'relaydomain'">
+      <v-expansion-panel-header v-slot="{ open }">
+        <v-row no-gutters>
+          <v-col cols="4">
+            <translate>Transport</translate>
+          </v-col>
+          <v-col
+            cols="8"
+            class="text--secondary"
+            >
+            <v-fade-transition leave-absolute>
+              <span v-if="open"></span>
+              <v-row
+                v-else
+                no-gutters
+                style="width: 100%"
+                >
+                <v-col cols="6">
+                  <translate class="mr-2">Service: </translate> {{ editedDomain.transport.service }}
+                </v-col>
+              </v-row>
+            </v-fade-transition>
+          </v-col>
+        </v-row>
+      </v-expansion-panel-header>
+      <v-expansion-panel-content>
+        <domain-transport-form ref="transportForm" :domain="editedDomain" />
+      </v-expansion-panel-content>
+    </v-expansion-panel>
+    <v-expansion-panel v-if="limitsConfig.enable_domain_limits && (authUser.role === 'SuperAdmins' || authUser.role === 'Resellers')">
+      <v-expansion-panel-header>
+        <v-row no-gutters>
+          <v-col cols="4">
+            <translate>Resources</translate>
+          </v-col>
+        </v-row>
+      </v-expansion-panel-header>
+      <v-expansion-panel-content>
+        <resources-form ref="resourcesForm" :resources="domain.resources" />
+      </v-expansion-panel-content>
+    </v-expansion-panel>
   </v-expansion-panels>
   <div class="mt-4 d-flex justify-end">
-    <v-btn color="grey lighten-1" @click="$router.go(-1)">
+    <v-btn @click="$router.go(-1)">
       <translate>Cancel</translate>
     </v-btn>
     <v-btn class="ml-4" color="primary darken-1" @click="save">
@@ -121,17 +162,29 @@ import { bus } from '@/main'
 import DomainDNSForm from './DomainDNSForm'
 import DomainGeneralForm from './DomainGeneralForm'
 import DomainLimitationsForm from './DomainLimitationsForm'
+import DomainTransportForm from './DomainTransportForm'
+import { mapGetters } from 'vuex'
+import parameters from '@/api/parameters'
+import ResourcesForm from '@/components/tools/ResourcesForm'
 
 export default {
   components: {
     'domain-dns-form': DomainDNSForm,
     DomainGeneralForm,
-    DomainLimitationsForm
+    DomainLimitationsForm,
+    DomainTransportForm,
+    ResourcesForm
   },
   props: ['domain'],
+  computed: {
+    ...mapGetters({
+      authUser: 'auth/authUser'
+    })
+  },
   data () {
     return {
       editedDomain: {},
+      limitsConfig: {},
       panel: 0
     }
   },
@@ -143,10 +196,28 @@ export default {
           return
         }
       }
-      this.$store.dispatch('domains/updateDomain', this.editedDomain).then(resp => {
+      if (this.$refs.resourcesForm !== undefined) {
+        const valid = await this.$refs.resourcesForm.validateForm()
+        if (!valid) {
+          return
+        }
+      }
+      const data = { ...this.editedDomain }
+      if (data.transport === null) {
+        delete data.transport
+      }
+      if (data.type === 'relaydomain') {
+        this.$refs.transportForm.checkSettingTypes(data)
+      }
+      this.$store.dispatch('domains/updateDomain', data).then(resp => {
         bus.$emit('notification', { msg: this.$gettext('Domain updated') })
       })
     }
+  },
+  created () {
+    parameters.getApplication('limits').then(resp => {
+      this.limitsConfig = resp.data
+    })
   },
   watch: {
     domain: {
@@ -156,6 +227,11 @@ export default {
         }
       },
       immediate: true
+    },
+    'editedDomain.type' (val) {
+      if (val === 'relaydomain' && this.editedDomain.transport === null) {
+        this.$set(this.editedDomain, 'transport', {})
+      }
     }
   }
 }

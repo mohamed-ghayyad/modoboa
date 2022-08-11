@@ -10,6 +10,7 @@ on:
     branches: [ master ]
   release:
     branches: [ master ]
+    types: [ published ]
 
 env:
   POSTGRES_HOST: localhost
@@ -148,6 +149,7 @@ jobs:
           codecov
 
   release:
+    if: github.event_name != 'pull_request'
     needs: coverage
     runs-on: ubuntu-latest
     steps:
@@ -162,7 +164,7 @@ jobs:
         shell: bash -l {0}
         run: |
           cd frontend
-          nvm install 12
+          nvm install 14
           yarn install
           yarn build
           cd ..

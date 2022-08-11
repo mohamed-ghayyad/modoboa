@@ -2,6 +2,7 @@
 
 import logging
 
+from django.utils.html import escape
 from django.utils.translation import ugettext as _
 
 from rest_framework import response, status
@@ -25,7 +26,7 @@ class TokenObtainPairView(jwt_views.TokenObtainPairView):
             logger.warning(
                 _("Failed connection attempt from '%s' as user '%s'"),
                 request.META["REMOTE_ADDR"],
-                serializer.data["username"]
+                escape(serializer.data["username"])
             )
             raise InvalidToken(e.args[0])
 
@@ -53,7 +54,7 @@ class TokenObtainPairView(jwt_views.TokenObtainPairView):
                         _("Password scheme mismatch. Updating %s password"),
                         user.username
                     )
-                    user.set_password(serializer.data["password"])
+                    user.set_password(request.data["password"])
                     user.save()
                 if pwhash.needs_rehash(user.password):
                     logger.info(

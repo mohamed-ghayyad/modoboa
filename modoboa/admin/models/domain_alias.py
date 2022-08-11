@@ -4,7 +4,7 @@ from reversion import revisions as reversion
 
 from django.contrib.contenttypes.fields import GenericRelation
 from django.db import models
-from django.utils.encoding import python_2_unicode_compatible, smart_text
+from django.utils.encoding import smart_text
 from django.utils.translation import ugettext as _, ugettext_lazy
 
 from modoboa.core import models as core_models, signals as core_signals
@@ -26,7 +26,6 @@ class DomainAliasManager(models.Manager):
         return self.get_queryset().filter(owners__user=admin)
 
 
-@python_2_unicode_compatible
 class DomainAlias(AdminObject):
 
     """Domain aliases."""
@@ -79,13 +78,17 @@ class DomainAlias(AdminObject):
         self.enabled = row[3].strip().lower() in ["true", "1", "yes", "y"]
         self.save(creator=user)
 
+    def to_csv_row(self):
+        """Export to row that can be included in a CSV file."""
+        return ["domainalias", self.name,
+                self.target.name, self.enabled]
+
     def to_csv(self, csvwriter):
         """Export a domain alias using CSV format
 
         :param csvwriter: a ``csv.writer`` object
         """
-        csvwriter.writerow(["domainalias", self.name,
-                            self.target.name, self.enabled])
+        csvwriter.writerow(self.to_csv_row())
 
 
 reversion.register(DomainAlias)

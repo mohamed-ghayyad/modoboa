@@ -92,11 +92,16 @@ class Domain(mixins.MessageLimitMixin, AdminObject):
         return self.alias_set.filter(internal=False).count()
 
     @property
-    def identities_count(self):
+    def identities_count(self) -> int:
         """Total number of identities in this domain."""
         return (
             self.mailbox_set.count() +
             self.alias_set.filter(internal=False).count())
+
+    @property
+    def opened_alarms_count(self) -> int:
+        """Number of alarms currently opened for this domain."""
+        return self.alarms.opened().count()
 
     @property
     def tags(self):
@@ -387,24 +392,32 @@ class Domain(mixins.MessageLimitMixin, AdminObject):
             instance=self)
         self.save(creator=user)
 
+    def to_csv_rows(self):
+        """Return a row to include in a CSV file."""
+        result = [
+            [
+                "domain",
+                force_text(self.name),
+                self.quota,
+                self.default_mailbox_quota,
+                self.enabled
+            ]
+        ]
+        for dalias in self.domainalias_set.all():
+            result.append(dalias.to_csv_row())
+        return result
+
     def to_csv(self, csvwriter):
         """Export domain and domain aliases to CSV format."""
-        csvwriter.writerow([
-            "domain",
-            force_text(self.name),
-            self.quota,
-            self.default_mailbox_quota,
-            self.enabled
-        ])
-        for dalias in self.domainalias_set.all():
-            dalias.to_csv(csvwriter)
+        for row in self.to_csv_rows():
+            csvwriter.writerow(row)
 
     def post_create(self, creator):
         """Post creation actions.
 
         :param ``User`` creator: user whos created this domain
         """
-        super(Domain, self).post_create(creator)
+        super().post_create(creator)
         for domalias in self.domainalias_set.all():
             domalias.post_create(creator)
 

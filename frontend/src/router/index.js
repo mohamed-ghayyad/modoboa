@@ -66,9 +66,27 @@ const routes = [
     }
   },
   {
+    path: '/identities/accounts/:id',
+    name: 'AccountDetail',
+    component: () => import('../views/identities/Account.vue'),
+    meta: {
+      requiresAuth: true,
+      allowedRoles: ['DomainAdmins', 'Resellers', 'SuperAdmins']
+    }
+  },
+  {
     path: '/identities/accounts/:id/edit',
     name: 'AccountEdit',
     component: () => import('../views/identities/AccountEdit.vue'),
+    meta: {
+      requiresAuth: true,
+      allowedRoles: ['DomainAdmins', 'Resellers', 'SuperAdmins']
+    }
+  },
+  {
+    path: '/identities/aliases/:id',
+    name: 'AliasDetail',
+    component: () => import('../views/identities/Alias.vue'),
     meta: {
       requiresAuth: true,
       allowedRoles: ['DomainAdmins', 'Resellers', 'SuperAdmins']
@@ -90,6 +108,14 @@ const routes = [
     meta: {
       requiresAuth: true,
       allowedRoles: ['SuperAdmins']
+    }
+  },
+  {
+    path: '/alarms',
+    name: 'Alarms',
+    component: () => import('../views/alarms/Alarms.vue'),
+    meta: {
+      requiresAuth: true
     }
   },
   {

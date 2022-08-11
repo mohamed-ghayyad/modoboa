@@ -1,5 +1,6 @@
 """Core components of the policy daemon."""
 
+from asgiref.sync import sync_to_async
 import asyncio
 import concurrent.futures
 from email.message import EmailMessage
@@ -142,7 +143,7 @@ async def apply_policies(attributes):
     sasl_username = attributes.get("sasl_username")
     if not sasl_username:
         return SUCCESS_ACTION
-    rclient = await aioredis.create_redis_pool(settings.REDIS_URL)
+    rclient = aioredis.from_url(settings.REDIS_URL, encoding="utf-8", decode_responses=True)
     decr_domain = False
     decr_user = False
     localpart, domain = split_mailbox(sasl_username)
@@ -163,8 +164,7 @@ async def apply_policies(attributes):
         await decrement_limit(rclient, "domain", domain)
     if decr_user:
         await decrement_limit(rclient, "account", sasl_username)
-    rclient.close()
-    await rclient.wait_closed()
+    await rclient.close()
     logger.debug("Let it pass")
     return SUCCESS_ACTION
 
@@ -216,6 +216,7 @@ def get_next_execution_dt():
         hour=0, minute=0, second=0)
 
 
+@sync_to_async
 @close_db_connections
 def get_domains_to_reset():
     """
@@ -230,9 +231,10 @@ def get_domains_to_reset():
     ).update(
         status=admin_constants.ALARM_CLOSED, closed=timezone.now()
     )
-    return qset
+    return list(qset)
 
 
+@sync_to_async
 @close_db_connections
 def get_mailboxes_to_reset():
     """
@@ -250,29 +252,20 @@ def get_mailboxes_to_reset():
     ).update(
         status=admin_constants.ALARM_CLOSED, closed=timezone.now()
     )
-    return qset
+    return list(qset)
 
 
 async def reset_counters():
     """Reset all counters."""
-    rclient = await aioredis.create_redis_pool(settings.REDIS_URL)
+    rclient = aioredis.from_url(settings.REDIS_URL, encoding="utf-8", decode_responses=True)
     logger.info("Resetting all counters")
-    # We're going to execute sync code so we need an executor
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
-    loop = asyncio.get_event_loop()
-    futures = [
-        loop.run_in_executor(executor, get_domains_to_reset),
-        loop.run_in_executor(executor, get_mailboxes_to_reset)
-    ]
-    domains, mboxes = await asyncio.gather(*futures)
-    for domain in domains:
-        rclient.hset(
+    for domain in await get_domains_to_reset():
+        await rclient.hset(
             constants.REDIS_HASHNAME, domain.name, domain.message_limit)
-    for mb in mboxes:
-        rclient.hset(
+    for mb in await get_mailboxes_to_reset():
+        await rclient.hset(
             constants.REDIS_HASHNAME, mb.full_address, mb.message_limit)
-    rclient.close()
-    await rclient.wait_closed()
+    await rclient.close()
     # reschedule
     asyncio.ensure_future(run_at(get_next_execution_dt(), reset_counters))
 

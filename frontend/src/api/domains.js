@@ -35,6 +35,9 @@ export default {
   updateDomain (domainId, data) {
     return repository.put(`/${domainResource}/${domainId}/`, data)
   },
+  patchDomain (domainId, data) {
+    return repository.patch(`/${domainResource}/${domainId}/`, data)
+  },
   deleteDomain (domainId, data) {
     return repository.post(`/${domainResource}/${domainId}/delete/`, data)
   },
@@ -46,5 +49,15 @@ export default {
   },
   deleteDomainAlias (aliasId) {
     return repository.delete(`/${domainAliasResource}/${aliasId}/`)
+  },
+  exportAll () {
+    return repository.get(`/${domainResource}/export/`)
+  },
+  importFromCSV (data) {
+    return repository.post(`/${domainResource}/import/`, data, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    })
   }
 }

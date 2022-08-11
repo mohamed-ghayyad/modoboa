@@ -98,9 +98,23 @@
         <account-mailbox-form ref="mailboxForm" :account="editedAccount" />
       </v-expansion-panel-content>
     </v-expansion-panel>
+    <v-expansion-panel
+      v-if="limitsConfig.enable_admin_limits && account.role !== 'SimpleUsers' && account.role !== 'SuperAdmins'"
+      >
+      <v-expansion-panel-header>
+        <v-row no-gutters>
+          <v-col cols="4">
+            <translate>Resources</translate>
+          </v-col>
+        </v-row>
+      </v-expansion-panel-header>
+      <v-expansion-panel-content>
+        <resources-form ref="resourcesForm" :resources="editedAccount.resources" />
+      </v-expansion-panel-content>
+    </v-expansion-panel>
   </v-expansion-panels>
   <div class="mt-4 d-flex justify-end">
-    <v-btn color="grey lighten-1" @click="$router.go(-1)">
+    <v-btn @click="$router.go(-1)">
       <translate>Cancel</translate>
     </v-btn>
     <v-btn class="ml-4" color="primary darken-1" @click="save">
@@ -117,12 +131,15 @@ import accounts from '@/api/accounts'
 import AccountGeneralForm from './AccountGeneralForm'
 import AccountMailboxForm from './AccountMailboxForm'
 import AccountRoleForm from './AccountRoleForm'
+import ResourcesForm from '@/components/tools/ResourcesForm'
+import parameters from '@/api/parameters'
 
 export default {
   components: {
     AccountGeneralForm,
     AccountMailboxForm,
-    AccountRoleForm
+    AccountRoleForm,
+    ResourcesForm
   },
   props: ['account'],
   computed: {
@@ -133,6 +150,7 @@ export default {
   data () {
     return {
       editedAccount: {},
+      limitsConfig: {},
       panel: 0
     }
   },
@@ -140,6 +158,12 @@ export default {
     async save () {
       if (this.$refs.generalForm !== undefined) {
         const valid = await this.$refs.generalForm.validateForm()
+        if (!valid) {
+          return
+        }
+      }
+      if (this.$refs.resourcesForm !== undefined) {
+        const valid = await this.$refs.resourcesForm.validateForm()
         if (!valid) {
           return
         }
@@ -158,6 +182,12 @@ export default {
           delete data.password
           delete data.password_confirmation
         }
+        if (this.$refs.resourcesForm !== undefined) {
+          data.resources = this.$refs.resourcesForm.getPayload()
+        }
+        if (data.aliases === null) {
+          delete data.aliases
+        }
         await accounts.patch(this.editedAccount.pk, data).then(resp => {
           bus.$emit('notification', { msg: this.$gettext('Account updated') })
         })
@@ -168,8 +198,16 @@ export default {
         if (this.$refs.mailboxForm) {
           this.$refs.mailboxForm.$refs.observer.setErrors(error.response.data)
         }
+        if (this.$refs.resourcesForm) {
+          this.$refs.resourcesForm.$refs.observer.setErrors(error.response.data)
+        }
       }
     }
+  },
+  created () {
+    parameters.getApplication('limits').then(resp => {
+      this.limitsConfig = resp.data
+    })
   },
   mounted () {
     this.$store.dispatch('identities/fetchDomains')
